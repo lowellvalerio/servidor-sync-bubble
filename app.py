@@ -82,62 +82,55 @@ def api_echo():
 MODALIDADES = {"CT","MR","US","DX","CR","XR","MG","NM","PT"}
 ESTATUS_OK = {"SIN REPORTE","POR AUTORIZAR","REPORTADO"}
 
+from time import time
+from datetime import datetime, timezone
+
 @app.route("/api/report", methods=["POST"])
 def api_report():
-    # Autenticación simple con API key
-    if not require_api_key(request):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
+    try:
+        data = request.get_json(force=True) or {}
+        inst = data.get("instId")
+        pac  = data.get("paciente") or {}
+        est  = data.get("estudio")  or {}
 
-    data = request.get_json(silent=True) or {}
-    # Se espera:
-    # {
-    #   "instId": "COROMINAS",
-    #   "paciente": {"folio":"...", "nombre":"...", "sexo":"MAS|FEM|OTRO", "edad": 30},
-    #   "estudio":  {"codigo_unico":"...", "modalidad":"MR", "estudio":"IRM DE CRANEO",
-    #                "fecha":"2025-08-22T12:00:00+00:00", "estatus":"SIN REPORTE", "folio":"..."}
-    # }
-    inst = data.get("instId")
-    pac = data.get("paciente") or {}
-    est = data.get("estudio") or {}
+        if not inst or not est.get("codigo_unico"):
+            return jsonify({"ok": False, "error": "instId o codigo_unico faltante"}), 400
 
-    if not inst:
-        return jsonify({"ok": False, "error": "instId requerido"}), 400
+        # Normalizamos reporte (aceptamos 'REPORTE' o 'reporte')
+        reporte_texto = est.get("REPORTE")
+        if reporte_texto is None:
+            reporte_texto = est.get("reporte")
+        if reporte_texto is None:
+            reporte_texto = ""  # nunca None
 
-    # Validaciones mínimas (alineadas con reglas de RTDB)
-    for key in ("folio", "nombre", "sexo", "edad"):
-        if pac.get(key) in (None, ""):
-            return jsonify({"ok": False, "error": f"paciente.{key} requerido"}), 400
-    if pac["sexo"] not in ("MAS", "FEM", "OTRO"):
-        return jsonify({"ok": False, "error": "paciente.sexo invalido"}), 400
+        # Fecha ISO: usa la que llega o pone ahora en UTC
+        fecha_iso = est.get("fecha")
+        if not fecha_iso:
+            fecha_iso = datetime.now(timezone.utc).isoformat()
 
-    for key in ("codigo_unico", "modalidad", "estudio", "fecha", "estatus", "folio"):
-        if est.get(key) in (None, ""):
-            return jsonify({"ok": False, "error": f"estudio.{key} requerido"}), 400
-    if est["modalidad"] not in MODALIDADES:
-        return jsonify({"ok": False, "error": "modalidad invalida"}), 400
-    if est["estatus"] not in ESTATUS_OK:
-        return jsonify({"ok": False, "error": "estatus invalido"}), 400
-    if est["folio"] != pac["folio"]:
-        return jsonify({"ok": False, "error": "folio de estudio != folio de paciente"}), 400
+        # 1) Paciente
+        db.reference(f"inst/{inst}/pacientes/{pac.get('folio', '')}").update({
+            "folio":   str(pac.get("folio", "")),
+            "nombre":  pac.get("nombre", ""),
+            "sexo":    pac.get("sexo", ""),
+            "edad":    pac.get("edad", 0),
+        })
 
-    # Escribir primero paciente (para que pase la validación del folio), luego estudio
-    db.reference(f"inst/{inst}/pacientes/{pac['folio']}").update({
-        "folio": pac["folio"],
-        "nombre": pac["nombre"],
-        "sexo": pac["sexo"],
-        "edad": pac["edad"]
-    })
+        # 2) Estudio (AQUÍ va REPORTE + updatedAt)
+        db.reference(f"inst/{inst}/estudios/{est['codigo_unico']}").update({
+            "codigo_unico": est["codigo_unico"],
+            "folio":        str(est.get("folio", pac.get("folio", ""))),
+            "modalidad":    est.get("modalidad", ""),
+            "estudio":      est.get("estudio", ""),
+            "fecha":        fecha_iso,
+            "estatus":      est.get("estatus", ""),
+            "REPORTE":      reporte_texto,          # <<--- NUEVO
+            "updatedAt":    int(time() * 1000),     # <<--- NUEVO
+        })
 
-    db.reference(f"inst/{inst}/estudios/{est['codigo_unico']}").update({
-        "codigo_unico": est["codigo_unico"],
-        "folio": est["folio"],
-        "modalidad": est["modalidad"],
-        "estudio": est["estudio"],
-        "fecha": est["fecha"],
-        "estatus": est["estatus"]
-    })
-
-    return jsonify({"ok": True}), 200
+        return jsonify({"ok": True}), 200
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # --- Run ---
 if __name__ == '__main__':
