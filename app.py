@@ -1,138 +1,87 @@
-import os
-import sqlite3
-import json
-import tempfile
+# app.py — Render/Flask → Firebase RTDB (cola /feed_estudios)
+# Requisitos en Render: pip install flask firebase-admin
+# Opcional (recomendado): variable de entorno PUSH_FEED_TOKEN para auth de cabecera
+
+import os, time
 from flask import Flask, request, jsonify
-
-# --- Flask ---
-app = Flask(__name__)
-
-# --- SQLite local (tu endpoint actual lo sigue usando) ---
-DB_PATH = "reporte_local.db"  # Ruta de tu base de datos SQLite
-
-@app.route('/recibir_reporte', methods=['POST'])
-def recibir_reporte():
-    data = request.get_json()
-    codigo_unico = data.get('codigo_unico')
-    contenido_reporte = data.get('REPORTE', '')
-    estatus = data.get('Estatus', 'REPORTADO')
-
-    if not codigo_unico:
-        return jsonify({"error": "Falta el código único"}), 400
-
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE Estudios
-            SET REPORTE = ?, Estatus = ?, sincronizado = 1
-            WHERE codigo_unico = ?
-        """, (contenido_reporte, estatus, codigo_unico))
-        conn.commit()
-        conn.close()
-        return jsonify({"success": True}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-# --- Healthcheck simple ---
-@app.route('/')
-def index():
-    return "Servidor de sincronización activo."
-
-@app.route('/health')
-def health():
-    return jsonify({"ok": True})
-
-# =========================
-#  Firebase Admin (nuevo)
-# =========================
+import firebase_admin
 from firebase_admin import credentials, db, initialize_app
 
-DATABASE_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com"
+# ---------- Config ----------
+RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"  # tu URL
+SERVICE_JSON = "reportes-intenligentes-firebase-adminsdk-fbsvc-9461abcac2.json"  # ruta a tu credencial
+FEED_PATH = "/feed_estudios"  # ← único destino permitido
+AUTH_TOKEN = os.getenv("PUSH_FEED_TOKEN")  # opcional: define esta var en Render para seguridad
 
-# Carga segura de credencial desde variable de entorno (Render)
-SERVICE_ACCOUNT_JSON = os.environ.get("FIREBASE_SERVICE_ACCOUNT_JSON")
-if SERVICE_ACCOUNT_JSON:
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".json")
-    tmp.write(SERVICE_ACCOUNT_JSON.encode("utf-8"))
-    tmp.flush()
-    cred = credentials.Certificate(tmp.name)
-else:
-    # Alternativa local: usar archivo en disco si no hay env var
-    cred_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if not cred_path or not os.path.exists(cred_path):
-        raise RuntimeError(
-            "No hay credencial de Firebase. Define FIREBASE_SERVICE_ACCOUNT_JSON o GOOGLE_APPLICATION_CREDENTIALS"
-        )
-    cred = credentials.Certificate(cred_path)
+# ---------- App ----------
+app = Flask(__name__)
 
-initialize_app(cred, {"databaseURL": DATABASE_URL})
+# Inicializa Firebase Admin 1 sola vez
+if not firebase_admin._apps:
+    cred = credentials.Certificate(SERVICE_JSON)
+    initialize_app(cred, {"databaseURL": RTDB_URL})
 
-# Seguridad simple para llamadas desde Bubble
-API_KEY_SERVER = os.environ.get("API_KEY_SERVER")  # define esto en Render
-def require_api_key(req):
-    return API_KEY_SERVER and req.headers.get("X-API-Key") == API_KEY_SERVER
+# ---------- Helper de Auth opcional ----------
+def check_auth(req):
+    if not AUTH_TOKEN:
+        return True  # sin token configurado → permitir (útil en pruebas)
+    hdr = req.headers.get("Authorization", "")
+    if not hdr.startswith("Bearer "):
+        return False
+    return hdr.split(" ", 1)[1] == AUTH_TOKEN
 
-# ===== Endpoint de eco para depurar (opcional) =====
-@app.route("/api/echo", methods=["POST"])
-def api_echo():
-    return {"ok": True, "headers": dict(request.headers), "body": request.get_json(silent=True)}, 200
+# ---------- Endpoints ----------
+@app.route("/push_feed", methods=["POST"])
+def push_feed():
+    # Seguridad opcional (Bearer)
+    if not check_auth(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
 
-# ===== Endpoint que Bubble llamará para escribir en Firebase =====
-MODALIDADES = {"CT","MR","US","DX","CR","XR","MG","NM","PT"}
-ESTATUS_OK = {"SIN REPORTE","POR AUTORIZAR","REPORTADO"}
-
-from time import time
-from datetime import datetime, timezone
-
-@app.route("/api/report", methods=["POST"])
-def api_report():
     try:
-        data = request.get_json(force=True) or {}
-        inst = data.get("instId")
-        pac  = data.get("paciente") or {}
-        est  = data.get("estudio")  or {}
+        p = request.get_json(force=True) or {}
+    except Exception:
+        return jsonify({"ok": False, "error": "JSON inválido"}), 400
 
-        if not inst or not est.get("codigo_unico"):
-            return jsonify({"ok": False, "error": "instId o codigo_unico faltante"}), 400
+    # Normalización de llaves (por si Bubble envía 'REPORTE' en mayúsculas)
+    p_norm = { (k.lower() if isinstance(k, str) else k): v for k, v in p.items() }
 
-        # Normalizamos reporte (aceptamos 'REPORTE' o 'reporte')
-        reporte_texto = est.get("REPORTE")
-        if reporte_texto is None:
-            reporte_texto = est.get("reporte")
-        if reporte_texto is None:
-            reporte_texto = ""  # nunca None
+    # Contrato mínimo requerido
+    cu = p_norm.get("codigo_unico")
+    if not cu:
+        return jsonify({"ok": False, "error": "codigo_unico es requerido"}), 400
 
-        # Fecha ISO: usa la que llega o pone ahora en UTC
-        fecha_iso = est.get("fecha")
-        if not fecha_iso:
-            fecha_iso = datetime.now(timezone.utc).isoformat()
+    estatus = p_norm.get("estatus", "SIN REPORTE")
+    reporte = p_norm.get("reporte", "")  # ya normalizamos a minúsculas
 
-        # 1) Paciente
-        db.reference(f"inst/{inst}/pacientes/{pac.get('folio', '')}").update({
-            "folio":   str(pac.get("folio", "")),
-            "nombre":  pac.get("nombre", ""),
-            "sexo":    pac.get("sexo", ""),
-            "edad":    pac.get("edad", 0),
-        })
+    # Campos adicionales (no obligatorios, útiles para trazas)
+    modalidad = p_norm.get("modalidad")
+    estudio   = p_norm.get("estudio")
+    fecha     = p_norm.get("fecha")
+    folio     = p_norm.get("folio")
 
-        # 2) Estudio (AQUÍ va REPORTE + updatedAt)
-        db.reference(f"inst/{inst}/estudios/{est['codigo_unico']}").update({
-            "codigo_unico": est["codigo_unico"],
-            "folio":        str(est.get("folio", pac.get("folio", ""))),
-            "modalidad":    est.get("modalidad", ""),
-            "estudio":      est.get("estudio", ""),
-            "fecha":        fecha_iso,
-            "estatus":      est.get("estatus", ""),
-            "REPORTE":      reporte_texto,          # <<--- NUEVO
-            "updatedAt":    int(time() * 1000),     # <<--- NUEVO
-        })
+    # Payload final que consumirá tu listener (modo cola)
+    data = {
+        "codigo_unico": cu,
+        "estatus": estatus,
+        "reporte": reporte,
+        "updatedAt": int(time.time() * 1000),
+    }
+    # Adjunta extras si vienen
+    if modalidad is not None: data["modalidad"] = modalidad
+    if estudio   is not None: data["estudio"]   = estudio
+    if fecha     is not None: data["fecha"]     = fecha
+    if folio     is not None: data["folio"]     = folio
 
-        return jsonify({"ok": True}), 200
+    try:
+        key = db.reference(FEED_PATH).push(data).key  # ← SIEMPRE push (clave auto con "-")
+        return jsonify({"ok": True, "key": key})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-# --- Run ---
-if __name__ == '__main__':
-    # En Render usarás gunicorn; local te sirve app.run
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 5000)))
+@app.route("/", methods=["GET"])
+def health():
+    return "OK", 200
+
+# ---------- Main local (Render usa WSGI) ----------
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
