@@ -1,66 +1,84 @@
-# dentro de app.py
-import os, json, base64
+# app.py — Render/Flask → Firebase RTDB (/feed_estudios)
+import os, json, base64, time
+from flask import Flask, request, jsonify
 import firebase_admin
-from firebase_admin import credentials, db, initialize_app
+from firebase_admin import credentials, db
 
+# 1) Instancia de Flask PRIMERO
+app = Flask(__name__)
+
+# 2) Config
 RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"
+FEED_PATH = "/feed_estudios"
+AUTH_TOKEN = os.getenv("PUSH_FEED_TOKEN")  # opcional
 
+# 3) Init Firebase (acepta ENV JSON, ENV base64 o archivo)
 def init_firebase():
     if firebase_admin._apps:
         return
 
-    # A) ENV en base64 (opcional)
     sa_b64 = os.getenv("FIREBASE_SERVICE_ACCOUNT_B64")
-    if sa_b64:
-        try:
-            data = json.loads(base64.b64decode(sa_b64))
-            cred = credentials.Certificate(data)
-            initialize_app(cred, {"databaseURL": RTDB_URL})
-            print("[creds] usando FIREBASE_SERVICE_ACCOUNT_B64")
-            return
-        except Exception as e:
-            raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT_B64 inválida: {e}")
-
-    # B) ENV JSON plano (recomendado)
     sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT")
-    if sa_json:
-        try:
-            cred = credentials.Certificate(json.loads(sa_json))
-            initialize_app(cred, {"databaseURL": RTDB_URL})
-            print("[creds] usando FIREBASE_SERVICE_ACCOUNT")
-            return
-        except Exception as e:
-            raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT inválida: {e}")
+    sa_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
 
-    # C) Ruta a archivo (Secret File o archivo en repo)
-    key_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
-    if key_path and os.path.exists(key_path):
-        cred = credentials.Certificate(key_path)
-        initialize_app(cred, {"databaseURL": RTDB_URL})
-        print(f"[creds] usando archivo: {key_path}")
+    print(f"[creds] vars presentes → "
+          f"FIREBASE_SERVICE_ACCOUNT={bool(sa_json)}, "
+          f"FIREBASE_SERVICE_ACCOUNT_B64={bool(sa_b64)}, "
+          f"FIREBASE_CREDENTIALS_PATH={sa_path}")
+
+    if sa_b64:
+        data = json.loads(base64.b64decode(sa_b64))
+        cred = credentials.Certificate(data)
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
+        print("[creds] usando FIREBASE_SERVICE_ACCOUNT_B64")
+        return
+
+    if sa_json:
+        cred = credentials.Certificate(json.loads(sa_json))
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
+        print("[creds] usando FIREBASE_SERVICE_ACCOUNT")
+        return
+
+    if sa_path and os.path.exists(sa_path):
+        cred = credentials.Certificate(sa_path)
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
+        print(f"[creds] usando archivo: {sa_path}")
         return
 
     raise RuntimeError("No hay credenciales: define FIREBASE_SERVICE_ACCOUNT (o *_B64) o FIREBASE_CREDENTIALS_PATH.")
 
 init_firebase()
 
-
+# 4) Helpers
 def check_auth(req):
     if not AUTH_TOKEN:
         return True
     hdr = req.headers.get("Authorization", "")
-    return hdr.startswith("Bearer ") and (hdr.split(" ", 1)[1] == AUTH_TOKEN)
+    return hdr.startswith("Bearer ") and hdr.split(" ", 1)[1] == AUTH_TOKEN
 
-@app.route("/push_feed", methods=["POST"])
+# 5) Rutas (después de tener 'app' definida)
+@app.get("/")
+def health():
+    return "OK", 200
+
+@app.get("/debug_env")
+def debug_env():
+    return jsonify({
+        "FIREBASE_SERVICE_ACCOUNT_present": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT")),
+        "FIREBASE_SERVICE_ACCOUNT_B64_present": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_B64")),
+        "FIREBASE_CREDENTIALS_PATH": os.getenv("FIREBASE_CREDENTIALS_PATH")
+    })
+
+@app.post("/push_feed")
 def push_feed():
     if not check_auth(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
     try:
         p = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"ok": False, "error": "JSON inválido"}), 400
 
-    # normaliza llaves a minúsculas (por si viene 'REPORTE')
     p = { (k.lower() if isinstance(k, str) else k): v for k, v in p.items() }
     cu = p.get("codigo_unico")
     if not cu:
@@ -72,21 +90,14 @@ def push_feed():
         "reporte": p.get("reporte", "") or "",
         "updatedAt": int(time.time() * 1000),
     }
-    # extras opcionales para trazas
     for extra in ("modalidad", "estudio", "fecha", "folio"):
         if p.get(extra) is not None:
             data[extra] = p[extra]
 
-    try:
-        key = db.reference(FEED_PATH).push(data).key  # SIEMPRE a /feed_estudios
-        return jsonify({"ok": True, "key": key})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+    key = db.reference(FEED_PATH).push(data).key
+    return jsonify({"ok": True, "key": key})
 
-@app.route("/", methods=["GET"])
-def health():
-    return "OK", 200
-
+# 6) Local dev
 if __name__ == "__main__":
-    # Render usa gunicorn, pero esto sirve localmente
+    # En Render usa gunicorn; localmente puedes correr esto
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
