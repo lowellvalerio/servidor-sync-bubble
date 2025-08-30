@@ -1,39 +1,49 @@
-# app.py — Render/Flask → Firebase RTDB (cola /feed_estudios)
-
-import os, time, json
-from flask import Flask, request, jsonify
+# dentro de app.py
+import os, json, base64
 import firebase_admin
 from firebase_admin import credentials, db, initialize_app
 
-RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"  # tu URL RTDB
-FEED_PATH = "/feed_estudios"
-AUTH_TOKEN = os.getenv("PUSH_FEED_TOKEN")  # opcional (Bearer)
-
-app = Flask(__name__)
+RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"
 
 def init_firebase():
     if firebase_admin._apps:
         return
-    # 1) Primero intenta por variable de entorno (recomendado)
+
+    # A) ENV en base64 (opcional)
+    sa_b64 = os.getenv("FIREBASE_SERVICE_ACCOUNT_B64")
+    if sa_b64:
+        try:
+            data = json.loads(base64.b64decode(sa_b64))
+            cred = credentials.Certificate(data)
+            initialize_app(cred, {"databaseURL": RTDB_URL})
+            print("[creds] usando FIREBASE_SERVICE_ACCOUNT_B64")
+            return
+        except Exception as e:
+            raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT_B64 inválida: {e}")
+
+    # B) ENV JSON plano (recomendado)
     sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT")
     if sa_json:
         try:
             cred = credentials.Certificate(json.loads(sa_json))
             initialize_app(cred, {"databaseURL": RTDB_URL})
+            print("[creds] usando FIREBASE_SERVICE_ACCOUNT")
             return
         except Exception as e:
             raise RuntimeError(f"FIREBASE_SERVICE_ACCOUNT inválida: {e}")
 
-    # 2) Fallback opcional: ruta a archivo (si lo tienes montado como secreto)
-    key_path = os.getenv("FIREBASE_CREDENTIALS_PATH")  # ej. /etc/secrets/firebase-key.json
+    # C) Ruta a archivo (Secret File o archivo en repo)
+    key_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
     if key_path and os.path.exists(key_path):
         cred = credentials.Certificate(key_path)
         initialize_app(cred, {"databaseURL": RTDB_URL})
+        print(f"[creds] usando archivo: {key_path}")
         return
 
-    raise RuntimeError("No hay credenciales: define FIREBASE_SERVICE_ACCOUNT con el JSON del service account.")
+    raise RuntimeError("No hay credenciales: define FIREBASE_SERVICE_ACCOUNT (o *_B64) o FIREBASE_CREDENTIALS_PATH.")
 
 init_firebase()
+
 
 def check_auth(req):
     if not AUTH_TOKEN:
