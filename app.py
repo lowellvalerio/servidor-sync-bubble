@@ -79,24 +79,37 @@ def push_feed():
     except Exception:
         return jsonify({"ok": False, "error": "JSON inválido"}), 400
 
+    # normalizar llaves
     p = { (k.lower() if isinstance(k, str) else k): v for k, v in p.items() }
+
     cu = p.get("codigo_unico")
-    if not cu:
-        return jsonify({"ok": False, "error": "codigo_unico es requerido"}), 400
+    email = p.get("email_usuario", "")
+    if not cu or not email:
+        return jsonify({"ok": False, "error": "Faltan datos requeridos"}), 400
+
+    # sanitizar email
+    usuario = email.replace("@", "_").replace(".", "_")
+
+    # destino personalizado por usuario
+    path = f"/usuarios/{usuario}/feed_estudios"
 
     data = {
         "codigo_unico": cu,
-        "estatus": p.get("estatus", "SIN REPORTE"),
+        "email_usuario": email,
+        "estatus": p.get("estatus", "REPORTADO"),
         "reporte": p.get("reporte", "") or "",
-        "email_usuario": p.get("email_usuario", ""),
+        "modalidad": p.get("modalidad", ""),
+        "estudio": p.get("estudio", ""),
+        "fecha": p.get("fecha", ""),
+        "folio": p.get("folio", ""),
         "updatedAt": int(time.time() * 1000),
     }
-    for extra in ("modalidad", "estudio", "fecha", "folio"):
-        if p.get(extra) is not None:
-            data[extra] = p[extra]
 
-    key = db.reference(FEED_PATH).push(data).key
-    return jsonify({"ok": True, "key": key})
+    try:
+        key = db.reference(path).push(data).key
+        return jsonify({"ok": True, "key": key})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # 6) Local dev
 if __name__ == "__main__":
