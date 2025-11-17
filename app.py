@@ -88,6 +88,7 @@ def push_feed():
         "codigo_unico": cu,
         "estatus": p.get("estatus", "SIN REPORTE"),
         "reporte": p.get("reporte", "") or "",
+        "email_usuario": p.get("email_usuario", ""),
         "updatedAt": int(time.time() * 1000),
     }
     for extra in ("modalidad", "estudio", "fecha", "folio"):
