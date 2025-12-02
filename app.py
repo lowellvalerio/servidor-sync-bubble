@@ -56,10 +56,15 @@ def check_auth(req):
     hdr = req.headers.get("Authorization", "")
     return hdr.startswith("Bearer ") and hdr.split(" ", 1)[1] == AUTH_TOKEN
 
-# 5) Rutas (después de tener 'app' definida)
+# 5) Rutas
 @app.get("/")
-def health():
+def home():
     return "OK", 200
+
+# === 🔥 NUEVO: Endpoint health check para Render ===
+@app.get("/healthz")
+def healthz():
+    return jsonify({"status": "ok"}), 200
 
 @app.get("/debug_env")
 def debug_env():
@@ -99,5 +104,4 @@ def push_feed():
 
 # 6) Local dev
 if __name__ == "__main__":
-    # En Render usa gunicorn; localmente puedes correr esto
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
