@@ -95,8 +95,16 @@ def push_feed():
     # sanitizar email
     usuario = email.replace("@", "_").replace(".", "_")
 
-    # destino personalizado por usuario
-    path = f"/usuarios/{usuario}/feed_estudios"
+    # destino por DISPOSITIVO
+    centro_id = p.get("centro_id")
+    device_id = p.get("device_id")
+    
+    print("DEBUG centro_id/device_id =>", centro_id, device_id)
+    
+    if not centro_id or not device_id:
+        return jsonify({"ok": False, "error": "Falta centro_id o device_id"}), 400
+    
+    path = f"/ecosistemas/{centro_id}/dispositivos/{device_id}/feed_estudios"
 
     data = {
         "codigo_unico": cu,
