@@ -8,7 +8,7 @@ from firebase_admin import credentials, db
 app = Flask(__name__)
 
 # 2) Config
-RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"
+RTDB_URL = os.getenv("RTDB_URL", "https://reportes-intenligentes-default-rtdb.firebaseio.com/")
 FEED_PATH = "/feed_estudios"
 AUTH_TOKEN = os.getenv("PUSH_FEED_TOKEN")  # opcional
 
