@@ -122,7 +122,16 @@ def push_feed():
         key = db.reference(path).push(data).key
         return jsonify({"ok": True, "key": key})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        import traceback
+        tb = traceback.format_exc()
+        print("🔥 FIREBASE PUSH ERROR:", repr(e))
+        print(tb)
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "trace": tb[-2000:]  # últimos 2000 chars
+        }), 500
 
 # 6) Local dev
 if __name__ == "__main__":
