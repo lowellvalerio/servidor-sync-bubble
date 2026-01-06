@@ -95,17 +95,14 @@ def push_feed():
     # sanitizar email
     usuario = email.replace("@", "_").replace(".", "_")
 
-    # destino por DISPOSITIVO
+    # destino por DISPOSITIVO  
     centro_id = p.get("centro_id")
     device_id = p.get("device_id")
-    
-    print("DEBUG centro_id/device_id =>", centro_id, device_id)
-    
-    if not centro_id or not device_id:
-        return jsonify({"ok": False, "error": "Falta centro_id o device_id"}), 400
-    
-    path = f"/ecosistemas/{centro_id}/dispositivos/{device_id}/feed_estudios"
 
+    if not centro_id:
+        return jsonify({"ok": False, "error": "Falta centro_id"}), 400
+
+    # Armar payload una vez
     data = {
         "codigo_unico": cu,
         "email_usuario": email,
@@ -119,19 +116,28 @@ def push_feed():
     }
 
     try:
-        key = db.reference(path).push(data).key
-        return jsonify({"ok": True, "key": key})
+        # ✅ Caso A: viene device_id => push SOLO a ese dispositivo
+        if device_id:
+            path = f"/ecosistemas/{centro_id}/dispositivos/{device_id}/feed_estudios"
+            key = db.reference(path).push(data).key
+            return jsonify({"ok": True, "mode": "single", "key": key, "device_id": device_id})
+
+        # ✅ Caso B: NO viene device_id => broadcast a TODOS los dispositivos del ecosistema
+        dispositivos_ref = db.reference(f"/ecosistemas/{centro_id}/dispositivos").get() or {}
+        device_ids = list(dispositivos_ref.keys())
+
+        if not device_ids:
+            return jsonify({"ok": False, "error": "No hay dispositivos registrados en este centro_id"}), 400
+
+        pushed = {}
+        for did in device_ids:
+            path = f"/ecosistemas/{centro_id}/dispositivos/{did}/feed_estudios"
+            pushed[did] = db.reference(path).push(data).key
+
+        return jsonify({"ok": True, "mode": "broadcast", "pushed": pushed, "count": len(pushed)})
+
     except Exception as e:
-        import traceback
-        tb = traceback.format_exc()
-        print("🔥 FIREBASE PUSH ERROR:", repr(e))
-        print(tb)
-        return jsonify({
-            "ok": False,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "trace": tb[-2000:]  # últimos 2000 chars
-        }), 500
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 # 6) Local dev
 if __name__ == "__main__":
