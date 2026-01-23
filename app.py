@@ -80,35 +80,39 @@ def debug_env():
 
 @app.post("/push_feed")
 def push_feed():
-    # Auth
     if not check_auth(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
 
-    # JSON body
+    # 🔎 DEBUG (poner aquí)
+    try:
+        print("=== /push_feed HIT ===")
+        print("headers:", dict(request.headers))
+        raw = request.get_data(as_text=True)
+        print("raw_body:", raw[:2000])
+        pj = request.get_json(silent=True)
+        print("json_silent:", pj)
+    except Exception as _e:
+        print("debug error:", repr(_e))
+
     try:
         p = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"ok": False, "error": "JSON inválido"}), 400
 
-    # normalizar llaves a lower (compat Bubble)
+    # normalizar llaves
     p = {(k.lower() if isinstance(k, str) else k): v for k, v in p.items()}
 
-    # requeridos mínimos
     cu = p.get("codigo_unico")
     email = p.get("email_usuario", "")
     if not cu or not email:
-        return jsonify({"ok": False, "error": "Faltan datos requeridos (codigo_unico, email_usuario)"}), 400
+        return jsonify({"ok": False, "error": "Faltan datos requeridos"}), 400
 
-    # destino (centro + device)
-    centro_id = p.get("centro_id")
-    device_id = p.get("device_id")  # puede venir mal, pero lo guardamos como source_device_id
+    # sanitizar email
+    usuario = email.replace("@", "_").replace(".", "_")
 
-    print("DEBUG centro_id/device_id =>", centro_id, device_id)
+    # destino personalizado por usuario
+    path = f"/usuarios/{usuario}/feed_estudios"
 
-    if not centro_id:
-        return jsonify({"ok": False, "error": "Falta centro_id"}), 400
-
-    # payload a difundir
     data = {
         "codigo_unico": cu,
         "email_usuario": email,
@@ -119,30 +123,11 @@ def push_feed():
         "fecha": p.get("fecha", ""),
         "folio": p.get("folio", ""),
         "updatedAt": int(time.time() * 1000),
-
-        # para depurar: quien lo originó según Bubble
-        "source_device_id": device_id,
     }
 
-    # 🔥 DIFUSIÓN A TODOS LOS DISPOSITIVOS REGISTRADOS DEL ECOSISTEMA
     try:
-        dispositivos_ref = db.reference(f"/ecosistemas/{centro_id}/dispositivos")
-        dispositivos = dispositivos_ref.get() or {}
-
-        if not isinstance(dispositivos, dict) or len(dispositivos) == 0:
-            return jsonify({
-                "ok": False,
-                "error": f"No hay dispositivos registrados para centro_id={centro_id}"
-            }), 400
-
-        pushed = {}
-        for dev_id in dispositivos.keys():
-            path = f"/ecosistemas/{centro_id}/dispositivos/{dev_id}/feed_estudios"
-            key = db.reference(path).push(data).key
-            pushed[dev_id] = key
-
-        return jsonify({"ok": True, "pushed": pushed}), 200
-
+        key = db.reference(path).push(data).key
+        return jsonify({"ok": True, "key": key})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
