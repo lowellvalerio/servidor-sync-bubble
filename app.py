@@ -110,8 +110,13 @@ def push_feed():
     # sanitizar email
     usuario = email.replace("@", "_").replace(".", "_")
 
-    # destino personalizado por usuario
-    path = f"/usuarios/{usuario}/feed_estudios"
+    # validar ecosistema
+    centro_id = (p.get("centro_id") or "").strip()
+    if not centro_id:
+        return jsonify({"ok": False, "error": "Falta centro_id"}), 400
+
+    # destino por ecosistema (CORRECTO)
+    path = f"/ecosistemas/{centro_id}/feed_estudios"
 
     data = {
         "codigo_unico": cu,
