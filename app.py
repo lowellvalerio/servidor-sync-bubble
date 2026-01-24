@@ -77,7 +77,7 @@ def debug_env():
         "FIREBASE_CREDENTIALS_PATH": os.getenv("FIREBASE_CREDENTIALS_PATH"),
         "PUSH_FEED_TOKEN_present": bool(os.getenv("PUSH_FEED_TOKEN"))
     }), 200
-
+    
 @app.route("/push_feed", methods=["POST"])
 def push_feed():
     if not check_auth(request):
@@ -102,27 +102,43 @@ def push_feed():
     # normalizar llaves
     p = {(k.lower() if isinstance(k, str) else k): v for k, v in p.items()}
 
-    # datos requeridos
+    # requeridos
     cu = (p.get("codigo_unico") or "").strip()
     email = (p.get("email_usuario") or "").strip()
     centro_id = (p.get("centro_id") or "").strip()
+    device_id = (p.get("device_id") or "").strip()
 
-    if not cu or not email or not centro_id:
+    if not cu or not email or not centro_id or not device_id:
         return jsonify({
             "ok": False,
-            "error": "Faltan datos requeridos (codigo_unico, email_usuario, centro_id)"
+            "error": "Faltan datos requeridos (codigo_unico, email_usuario, centro_id, device_id)"
         }), 400
 
-    # sanitizar email (solo como dato)
+    # sanitizar email (solo informativo)
     usuario = email.replace("@", "_").replace(".", "_")
 
-    # ruta por ecosistema
-    path = f"/ecosistemas/{centro_id}/feed_estudios"
+    # clave fija para que ACTUALICE (no duplique)
+    safe_cu = (cu.replace(".", "_")
+                 .replace("#", "_")
+                 .replace("$", "_")
+                 .replace("[", "_")
+                 .replace("]", "_")
+                 .replace("/", "_"))
+
+    # sanitizar device_id por si acaso
+    safe_device = (device_id.replace(".", "_")
+                            .replace("#", "_")
+                            .replace("$", "_")
+                            .replace("[", "_")
+                            .replace("]", "_")
+                            .replace("/", "_"))
 
     data = {
         "codigo_unico": cu,
         "email_usuario": email,
         "usuario_sanitizado": usuario,
+        "centro_id": centro_id,
+        "device_id": device_id,
         "estatus": p.get("estatus", "REPORTADO"),
         "reporte": p.get("reporte", "") or "",
         "modalidad": p.get("modalidad", ""),
@@ -133,18 +149,19 @@ def push_feed():
     }
 
     try:
-        # 🔐 usar codigo_unico como key fija (ACTUALIZA, no duplica)
-        safe_cu = cu.replace(".", "_") \
-                    .replace("#", "_") \
-                    .replace("$", "_") \
-                    .replace("[", "_") \
-                    .replace("]", "_") \
-                    .replace("/", "_")
+        root = db.reference("/")
 
-        ref = db.reference(f"{path}/{safe_cu}")
-        ref.set(data)   # ← ACTUALIZA el mismo estudio
+        updates = {
+            # ✅ por ecosistema
+            f"ecosistemas/{centro_id}/feed_estudios/{safe_cu}": data,
 
-        return jsonify({"ok": True, "key": safe_cu})
+            # ✅ por dispositivo (para que el listener lo vea)
+            f"ecosistemas/{centro_id}/dispositivos/{safe_device}/feed_estudios/{safe_cu}": data,
+        }
+
+        root.update(updates)
+
+        return jsonify({"ok": True, "key": safe_cu, "device_key": safe_device})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
