@@ -77,11 +77,8 @@ def debug_env():
         "FIREBASE_CREDENTIALS_PATH": os.getenv("FIREBASE_CREDENTIALS_PATH"),
         "PUSH_FEED_TOKEN_present": bool(os.getenv("PUSH_FEED_TOKEN"))
     }), 200
-
-from flask import request, jsonify
-import time
-from firebase_admin import db
-
+    
+@app.post("/push_feed")
 def push_feed():
     if not check_auth(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
@@ -145,7 +142,6 @@ def push_feed():
     except Exception as e:
         print("❌ push_feed ERROR:", repr(e))
         return jsonify({"ok": False, "error": str(e)}), 500
-
 
 # 6) Local dev
 if __name__ == "__main__":
