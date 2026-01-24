@@ -77,8 +77,11 @@ def debug_env():
         "FIREBASE_CREDENTIALS_PATH": os.getenv("FIREBASE_CREDENTIALS_PATH"),
         "PUSH_FEED_TOKEN_present": bool(os.getenv("PUSH_FEED_TOKEN"))
     }), 200
-    
-@app.route("/push_feed", methods=["POST"])
+
+from flask import request, jsonify
+import time
+from firebase_admin import db
+
 def push_feed():
     if not check_auth(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
@@ -94,76 +97,55 @@ def push_feed():
     except Exception as _e:
         print("debug error:", repr(_e))
 
+    # Parse JSON
     try:
         p = request.get_json(force=True) or {}
     except Exception:
         return jsonify({"ok": False, "error": "JSON inválido"}), 400
 
-    # normalizar llaves
+    # Normalizar llaves a lower()
     p = {(k.lower() if isinstance(k, str) else k): v for k, v in p.items()}
 
-    # requeridos
     cu = (p.get("codigo_unico") or "").strip()
     email = (p.get("email_usuario") or "").strip()
+
     centro_id = (p.get("centro_id") or "").strip()
     device_id = (p.get("device_id") or "").strip()
 
-    if not cu or not email or not centro_id or not device_id:
-        return jsonify({
-            "ok": False,
-            "error": "Faltan datos requeridos (codigo_unico, email_usuario, centro_id, device_id)"
-        }), 400
+    if not cu or not email:
+        return jsonify({"ok": False, "error": "Faltan datos requeridos: codigo_unico/email_usuario"}), 400
+    if not centro_id:
+        return jsonify({"ok": False, "error": "Falta centro_id"}), 400
+    if not device_id:
+        return jsonify({"ok": False, "error": "Falta device_id"}), 400
 
-    # sanitizar email (solo informativo)
-    usuario = email.replace("@", "_").replace(".", "_")
-
-    # clave fija para que ACTUALICE (no duplique)
-    safe_cu = (cu.replace(".", "_")
-                 .replace("#", "_")
-                 .replace("$", "_")
-                 .replace("[", "_")
-                 .replace("]", "_")
-                 .replace("/", "_"))
-
-    # sanitizar device_id por si acaso
-    safe_device = (device_id.replace(".", "_")
-                            .replace("#", "_")
-                            .replace("$", "_")
-                            .replace("[", "_")
-                            .replace("]", "_")
-                            .replace("/", "_"))
+    # ✅ Ruta CORRECTA: por ecosistema + dispositivo (lo que tu listener escucha)
+    path = f"/ecosistemas/{centro_id}/dispositivos/{device_id}/feed_estudios"
 
     data = {
         "codigo_unico": cu,
         "email_usuario": email,
-        "usuario_sanitizado": usuario,
+        "estatus": (p.get("estatus") or "REPORTADO"),
+        "reporte": (p.get("reporte") or ""),
+        "modalidad": (p.get("modalidad") or ""),
+        "estudio": (p.get("estudio") or ""),
+        "fecha": (p.get("fecha") or ""),
+        "folio": (p.get("folio") or ""),
         "centro_id": centro_id,
         "device_id": device_id,
-        "estatus": p.get("estatus", "REPORTADO"),
-        "reporte": p.get("reporte", "") or "",
-        "modalidad": p.get("modalidad", ""),
-        "estudio": p.get("estudio", ""),
-        "fecha": p.get("fecha", ""),
-        "folio": p.get("folio", ""),
         "updatedAt": int(time.time() * 1000),
+        "source": "bubble",
     }
 
     try:
-        root = db.reference("/")
-
-        updates = {
-            # ✅ por ecosistema
-            f"ecosistemas/{centro_id}/feed_estudios/{safe_cu}": data,
-
-            # ✅ por dispositivo (para que el listener lo vea)
-            f"ecosistemas/{centro_id}/dispositivos/{safe_device}/feed_estudios/{safe_cu}": data,
-        }
-
-        root.update(updates)
-
-        return jsonify({"ok": True, "key": safe_cu, "device_key": safe_device})
+        ref = db.reference(path)
+        key = ref.push(data).key
+        print(f"✅ push_feed OK => {path}  key={key}")
+        return jsonify({"ok": True, "key": key, "path": path}), 200
     except Exception as e:
+        print("❌ push_feed ERROR:", repr(e))
         return jsonify({"ok": False, "error": str(e)}), 500
+
 
 # 6) Local dev
 if __name__ == "__main__":
