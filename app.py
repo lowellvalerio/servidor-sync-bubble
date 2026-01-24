@@ -78,12 +78,12 @@ def debug_env():
         "PUSH_FEED_TOKEN_present": bool(os.getenv("PUSH_FEED_TOKEN"))
     }), 200
 
-@app.post("/push_feed")
+@app.route("/push_feed", methods=["POST"])
 def push_feed():
     if not check_auth(request):
         return jsonify({"ok": False, "error": "Unauthorized"}), 401
 
-    # 🔎 DEBUG (poner aquí)
+    # 🔎 DEBUG
     try:
         print("=== /push_feed HIT ===")
         print("headers:", dict(request.headers))
@@ -102,25 +102,27 @@ def push_feed():
     # normalizar llaves
     p = {(k.lower() if isinstance(k, str) else k): v for k, v in p.items()}
 
-    cu = p.get("codigo_unico")
-    email = p.get("email_usuario", "")
-    if not cu or not email:
-        return jsonify({"ok": False, "error": "Faltan datos requeridos"}), 400
+    # datos requeridos
+    cu = (p.get("codigo_unico") or "").strip()
+    email = (p.get("email_usuario") or "").strip()
+    centro_id = (p.get("centro_id") or "").strip()
 
-    # sanitizar email
+    if not cu or not email or not centro_id:
+        return jsonify({
+            "ok": False,
+            "error": "Faltan datos requeridos (codigo_unico, email_usuario, centro_id)"
+        }), 400
+
+    # sanitizar email (solo como dato)
     usuario = email.replace("@", "_").replace(".", "_")
 
-    # validar ecosistema
-    centro_id = (p.get("centro_id") or "").strip()
-    if not centro_id:
-        return jsonify({"ok": False, "error": "Falta centro_id"}), 400
-
-    # destino por ecosistema (CORRECTO)
+    # ruta por ecosistema
     path = f"/ecosistemas/{centro_id}/feed_estudios"
 
     data = {
         "codigo_unico": cu,
         "email_usuario": email,
+        "usuario_sanitizado": usuario,
         "estatus": p.get("estatus", "REPORTADO"),
         "reporte": p.get("reporte", "") or "",
         "modalidad": p.get("modalidad", ""),
@@ -131,8 +133,18 @@ def push_feed():
     }
 
     try:
-        key = db.reference(path).push(data).key
-        return jsonify({"ok": True, "key": key})
+        # 🔐 usar codigo_unico como key fija (ACTUALIZA, no duplica)
+        safe_cu = cu.replace(".", "_") \
+                    .replace("#", "_") \
+                    .replace("$", "_") \
+                    .replace("[", "_") \
+                    .replace("]", "_") \
+                    .replace("/", "_")
+
+        ref = db.reference(f"{path}/{safe_cu}")
+        ref.set(data)   # ← ACTUALIZA el mismo estudio
+
+        return jsonify({"ok": True, "key": safe_cu})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
