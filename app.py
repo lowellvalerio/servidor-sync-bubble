@@ -13,7 +13,7 @@ AUTH_TOKEN = os.getenv("PUSH_FEED_TOKEN")  # opcional (si está seteado, exige B
 
 # 3) Init Firebase (acepta ENV JSON, ENV base64 o archivo)
 def init_firebase():
-@@ -21,10 +20,12 @@ def init_firebase():
+@@ -21,10 +20,12 @@
     sa_json = os.getenv("FIREBASE_SERVICE_ACCOUNT")
     sa_path = os.getenv("FIREBASE_CREDENTIALS_PATH")
 
@@ -30,7 +30,7 @@ def init_firebase():
 
     if sa_b64:
         data = json.loads(base64.b64decode(sa_b64))
-@@ -45,12 +46,15 @@ def init_firebase():
+@@ -45,12 +46,15 @@
         print(f"[creds] usando archivo: {sa_path}")
         return
 
@@ -47,7 +47,7 @@ def check_auth(req):
     if not AUTH_TOKEN:
         return True
     hdr = req.headers.get("Authorization", "")
-@@ -61,7 +65,6 @@ def check_auth(req):
+@@ -61,7 +65,6 @@
 def home():
     return "OK", 200
 
@@ -55,7 +55,7 @@ def home():
 @app.get("/healthz")
 def healthz():
     return jsonify({"status": "ok"}), 200
-@@ -71,38 +74,41 @@ def debug_env():
+@@ -71,38 +74,41 @@
     return jsonify({
         "FIREBASE_SERVICE_ACCOUNT_present": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT")),
         "FIREBASE_SERVICE_ACCOUNT_B64_present": bool(os.getenv("FIREBASE_SERVICE_ACCOUNT_B64")),
@@ -108,7 +108,7 @@ def push_feed():
     data = {
         "codigo_unico": cu,
         "email_usuario": email,
-@@ -113,28 +119,29 @@ def push_feed():
+@@ -113,32 +119,33 @@
         "fecha": p.get("fecha", ""),
         "folio": p.get("folio", ""),
         "updatedAt": int(time.time() * 1000),
@@ -153,3 +153,7 @@ def push_feed():
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+# 6) Local dev
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
