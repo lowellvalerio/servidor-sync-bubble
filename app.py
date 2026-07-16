@@ -1,5 +1,5 @@
 # app.py — Render/Flask → Firebase RTDB (/ecosistemas/.../dispositivos/.../feed_estudios)
-import os, json, base64, time
+import os, json, base64, time, hashlib, hmac
 from flask import Flask, request, jsonify
 import firebase_admin
 from firebase_admin import credentials, db
@@ -60,6 +60,33 @@ def check_auth(req):
     hdr = req.headers.get("Authorization", "")
     return hdr.startswith("Bearer ") and hdr.split(" ", 1)[1] == AUTH_TOKEN
 
+def normalize_payload(payload):
+    return {
+        (key.lower() if isinstance(key, str) else key): value
+        for key, value in (payload or {}).items()
+    }
+
+def report_state_key(centro_id, codigo_unico):
+    """Use a Firebase-safe, non-enumerable key for a report state."""
+    raw = f"{centro_id}:{codigo_unico}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+def parse_report_state(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("estado_reporte debe ser un objeto JSON válido") from exc
+    if not isinstance(value, dict):
+        raise ValueError("estado_reporte debe ser un objeto JSON")
+    return value
+
+def report_state_ref(centro_id, codigo_unico):
+    key = report_state_key(centro_id, codigo_unico)
+    return db.reference(f"/ecosistemas/{centro_id}/estados_reportes/{key}")
+
 # 5) Rutas
 @app.get("/")
 def home():
@@ -91,7 +118,7 @@ def push_feed():
         return jsonify({"ok": False, "error": "JSON inválido"}), 400
 
     # normalizar llaves a lower (compat Bubble)
-    p = {(k.lower() if isinstance(k, str) else k): v for k, v in p.items()}
+    p = normalize_payload(p)
 
     # requeridos mínimos
     cu = p.get("codigo_unico")
@@ -107,6 +134,11 @@ def push_feed():
 
     if not centro_id:
         return jsonify({"ok": False, "error": "Falta centro_id"}), 400
+
+    try:
+        estado_reporte = parse_report_state(p.get("estado_reporte", p.get("estado")))
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
 
     # payload a difundir
     data = {
@@ -135,16 +167,79 @@ def push_feed():
                 "error": f"No hay dispositivos registrados para centro_id={centro_id}"
             }), 400
 
+        # El estado estructurado se guarda una sola vez, separado del feed que
+        # consume la aplicación local. De este modo los clientes anteriores
+        # siguen funcionando y Bubble puede restaurar el estudio por codigo_unico.
+        estado_guardado = False
+        if estado_reporte is not None:
+            report_state_ref(centro_id, cu).set({
+                "codigo_unico": cu,
+                "email_usuario": email,
+                "centro_id": centro_id,
+                "modalidad": p.get("modalidad", ""),
+                "estudio": p.get("estudio", ""),
+                "estado_reporte": estado_reporte,
+                "updatedAt": data["updatedAt"],
+            })
+            estado_guardado = True
+
         pushed = {}
         for dev_id in dispositivos.keys():
             path = f"/ecosistemas/{centro_id}/dispositivos/{dev_id}/feed_estudios"
             key = db.reference(path).push(data).key
             pushed[dev_id] = key
 
-        return jsonify({"ok": True, "pushed": pushed}), 200
+        return jsonify({
+            "ok": True,
+            "pushed": pushed,
+            "estado_guardado": estado_guardado,
+        }), 200
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.post("/recuperar_estado_reporte")
+def recuperar_estado_reporte():
+    if not check_auth(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+    try:
+        p = normalize_payload(request.get_json(force=True) or {})
+    except Exception:
+        return jsonify({"ok": False, "error": "JSON inválido"}), 400
+
+    cu = str(p.get("codigo_unico") or "").strip()
+    centro_id = str(p.get("centro_id") or "").strip()
+    email = str(p.get("email_usuario") or "").strip()
+    if not cu or not centro_id or not email:
+        return jsonify({
+            "ok": False,
+            "error": "Faltan datos requeridos (codigo_unico, centro_id, email_usuario)",
+        }), 400
+
+    try:
+        saved = report_state_ref(centro_id, cu).get()
+        if not isinstance(saved, dict):
+            return jsonify({"ok": False, "error": "Estado no encontrado"}), 404
+
+        saved_email = str(saved.get("email_usuario") or "")
+        saved_code = str(saved.get("codigo_unico") or "")
+        if not hmac.compare_digest(saved_email, email) or not hmac.compare_digest(saved_code, cu):
+            # No revelar si el código existe cuando la identidad no coincide.
+            return jsonify({"ok": False, "error": "Estado no encontrado"}), 404
+
+        estado = saved.get("estado_reporte")
+        if not isinstance(estado, dict):
+            return jsonify({"ok": False, "error": "Estado no encontrado"}), 404
+
+        return jsonify({
+            "ok": True,
+            "codigo_unico": cu,
+            "estado_reporte": estado,
+            "updatedAt": saved.get("updatedAt"),
+        }), 200
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 # 6) Local dev
 if __name__ == "__main__":
