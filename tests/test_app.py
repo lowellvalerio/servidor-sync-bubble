@@ -104,6 +104,65 @@ class ServidorSyncBubbleTest(unittest.TestCase):
         })
         self.assertEqual(result.status_code, 400)
 
+    def test_guardar_reporte_preserves_legacy_response_contract(self):
+        state = {"version": "lumbar-test-v2", "selecciones": {"modulos": {}}}
+        result = self.client.post("/guardar-reporte", headers=self.headers, json={
+            **self.identity,
+            "estado_reporte": state,
+            "modalidad": "RX",
+            "estudio": "RAYOS X DE COLUMNA LUMBAR",
+        })
+
+        self.assertEqual(result.status_code, 200)
+        body = result.get_json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["status_push_feed"], 200)
+        self.assertTrue(body["respuesta"]["estado_guardado"])
+        self.assertEqual(len(FakeReference.pushes), 1)
+
+    def test_guardar_reporte_propagates_validation_error(self):
+        result = self.client.post("/guardar-reporte", headers=self.headers, json={
+            "codigo_unico": "SIN-EMAIL",
+            "centro_id": "centro-test",
+        })
+
+        self.assertEqual(result.status_code, 400)
+        body = result.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["status_push_feed"], 400)
+
+    def test_recuperar_estado_alias_returns_structured_state(self):
+        state = {"version": "lumbar-test-v3", "selecciones": {"modulos": {}}}
+        self.client.post("/push_feed", headers=self.headers, json={
+            **self.identity,
+            "estado_reporte": state,
+        })
+
+        result = self.client.post(
+            "/recuperar-estado",
+            headers=self.headers,
+            json=self.identity,
+        )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.get_json()["estado_reporte"], state)
+
+    def test_bubble_preflight_allows_authorization_and_json(self):
+        result = self.client.options("/guardar-reporte", headers={
+            "Origin": "https://reportesinteligentes.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Authorization, Content-Type",
+        })
+
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(
+            result.headers.get("Access-Control-Allow-Origin"),
+            "https://reportesinteligentes.com",
+        )
+        allowed_headers = result.headers.get("Access-Control-Allow-Headers", "").lower()
+        self.assertIn("authorization", allowed_headers)
+        self.assertIn("content-type", allowed_headers)
+
 
 if __name__ == "__main__":
     unittest.main()

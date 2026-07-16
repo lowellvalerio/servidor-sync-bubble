@@ -1,11 +1,13 @@
 # app.py — Render/Flask → Firebase RTDB (/ecosistemas/.../dispositivos/.../feed_estudios)
 import os, json, base64, time, hashlib, hmac
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 import firebase_admin
 from firebase_admin import credentials, db
 
 # 1) Instancia de Flask PRIMERO
 app = Flask(__name__)
+CORS(app)
 
 # 2) Config
 RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"
@@ -86,6 +88,17 @@ def parse_report_state(value):
 def report_state_ref(centro_id, codigo_unico):
     key = report_state_key(centro_id, codigo_unico)
     return db.reference(f"/ecosistemas/{centro_id}/estados_reportes/{key}")
+
+def response_parts(result):
+    """Normalize a Flask view result without issuing an internal HTTP request."""
+    if isinstance(result, tuple):
+        response = result[0]
+        status = int(result[1])
+    else:
+        response = result
+        status = int(getattr(response, "status_code", 200))
+    body = response.get_json(silent=True) if hasattr(response, "get_json") else None
+    return status, body if isinstance(body, dict) else {}
 
 # 5) Rutas
 @app.get("/")
@@ -198,6 +211,18 @@ def push_feed():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
+@app.post("/guardar-reporte")
+def guardar_reporte():
+    """Compatibility endpoint formerly served by motor-guardar-reportes."""
+    status, body = response_parts(push_feed())
+    upstream_ok = 200 <= status < 300 and body.get("ok", True) is not False
+    return jsonify({
+        "ok": upstream_ok,
+        "status_push_feed": status,
+        "respuesta": body,
+    }), status
+
+@app.post("/recuperar-estado")
 @app.post("/recuperar_estado_reporte")
 def recuperar_estado_reporte():
     if not check_auth(request):
