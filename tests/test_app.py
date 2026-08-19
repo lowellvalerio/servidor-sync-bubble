@@ -25,17 +25,38 @@ class FakeReference:
 
 fake_db = types.ModuleType("firebase_admin.db")
 fake_db.reference = lambda path: FakeReference(path)
+class FakeBlob:
+    values = {}
+
+    def __init__(self, path):
+        self.path = path
+        self.metadata = {}
+
+    def upload_from_string(self, value, content_type=None):
+        self.values[self.path] = {"value": value, "content_type": content_type, "metadata": self.metadata}
+
+    def generate_signed_url(self, **_kwargs):
+        return f"https://storage.test/{self.path}"
+
+class FakeBucket:
+    def blob(self, path):
+        return FakeBlob(path)
+
+fake_storage = types.ModuleType("firebase_admin.storage")
+fake_storage.bucket = lambda: FakeBucket()
 fake_credentials = types.ModuleType("firebase_admin.credentials")
 fake_credentials.Certificate = lambda value: value
 fake_firebase = types.ModuleType("firebase_admin")
 fake_firebase._apps = [object()]
 fake_firebase.credentials = fake_credentials
 fake_firebase.db = fake_db
+fake_firebase.storage = fake_storage
 fake_firebase.initialize_app = lambda *args, **kwargs: None
 
 sys.modules["firebase_admin"] = fake_firebase
 sys.modules["firebase_admin.credentials"] = fake_credentials
 sys.modules["firebase_admin.db"] = fake_db
+sys.modules["firebase_admin.storage"] = fake_storage
 os.environ["PUSH_FEED_TOKEN"] = "test-token"
 service = importlib.import_module("app")
 
@@ -46,6 +67,7 @@ class ServidorSyncBubbleTest(unittest.TestCase):
             "/ecosistemas/centro-test/dispositivos": {"equipo-1": {}}
         }
         FakeReference.pushes = []
+        FakeBlob.values = {}
         self.client = service.app.test_client()
         self.headers = {"Authorization": "Bearer test-token"}
         self.identity = {
@@ -162,6 +184,37 @@ class ServidorSyncBubbleTest(unittest.TestCase):
         allowed_headers = result.headers.get("Access-Control-Allow-Headers", "").lower()
         self.assertIn("authorization", allowed_headers)
         self.assertIn("content-type", allowed_headers)
+
+    def test_upload_png_is_saved_and_returned_in_feed(self):
+        import io
+        upload = self.client.post("/subir_esquema_prostata", headers=self.headers, data={
+            **self.identity,
+            "archivo": (io.BytesIO(b"\x89PNG\r\n\x1a\ncontenido"), "esquema.png"),
+        }, content_type="multipart/form-data")
+        self.assertEqual(upload.status_code, 201)
+        adjunto = upload.get_json()["adjunto"]
+        self.assertEqual(adjunto["tipo"], "esquema_prostata")
+        self.assertIn(adjunto["storage_path"], FakeBlob.values)
+
+        saved = self.client.post("/push_feed", headers=self.headers, json={
+            **self.identity,
+            "adjuntos": [adjunto],
+        })
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(FakeReference.pushes[0][1]["adjuntos"][0]["tipo"], "esquema_prostata")
+
+    def test_download_attachment_requires_matching_identity(self):
+        import io
+        self.client.post("/subir_esquema_prostata", headers=self.headers, data={
+            **self.identity,
+            "archivo": (io.BytesIO(b"\x89PNG\r\n\x1a\ncontenido"), "esquema.png"),
+        }, content_type="multipart/form-data")
+        result = self.client.post("/obtener_adjunto_reporte", headers=self.headers, json={
+            **self.identity,
+            "tipo": "esquema_prostata",
+        })
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.get_json()["url"].startswith("https://storage.test/"))
 
 
 if __name__ == "__main__":

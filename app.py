@@ -1,9 +1,10 @@
 # app.py — Render/Flask → Firebase RTDB (/ecosistemas/.../dispositivos/.../feed_estudios)
-import os, json, base64, time, hashlib, hmac
+import os, json, base64, time, hashlib, hmac, re
+from datetime import timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
-from firebase_admin import credentials, db
+from firebase_admin import credentials, db, storage
 
 # 1) Instancia de Flask PRIMERO
 app = Flask(__name__)
@@ -12,6 +13,8 @@ CORS(app)
 # 2) Config
 RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"
 AUTH_TOKEN = os.getenv("PUSH_FEED_TOKEN")  # opcional (si está seteado, exige Bearer)
+FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "reportes-intenligentes.appspot.com")
+MAX_ATTACHMENT_BYTES = int(os.getenv("MAX_ATTACHMENT_BYTES", str(8 * 1024 * 1024)))
 
 # 3) Init Firebase (acepta ENV JSON, ENV base64 o archivo)
 def init_firebase():
@@ -32,19 +35,19 @@ def init_firebase():
     if sa_b64:
         data = json.loads(base64.b64decode(sa_b64))
         cred = credentials.Certificate(data)
-        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL, "storageBucket": FIREBASE_STORAGE_BUCKET})
         print("[creds] usando FIREBASE_SERVICE_ACCOUNT_B64")
         return
 
     if sa_json:
         cred = credentials.Certificate(json.loads(sa_json))
-        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL, "storageBucket": FIREBASE_STORAGE_BUCKET})
         print("[creds] usando FIREBASE_SERVICE_ACCOUNT")
         return
 
     if sa_path and os.path.exists(sa_path):
         cred = credentials.Certificate(sa_path)
-        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL, "storageBucket": FIREBASE_STORAGE_BUCKET})
         print(f"[creds] usando archivo: {sa_path}")
         return
 
@@ -88,6 +91,27 @@ def parse_report_state(value):
 def report_state_ref(centro_id, codigo_unico):
     key = report_state_key(centro_id, codigo_unico)
     return db.reference(f"/ecosistemas/{centro_id}/estados_reportes/{key}")
+
+def safe_segment(value):
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(value or "").strip())
+    return cleaned[:100] or "sin_centro"
+
+def attachment_ref(centro_id, codigo_unico, tipo="esquema_prostata"):
+    key = report_state_key(centro_id, codigo_unico)
+    return db.reference(f"/ecosistemas/{safe_segment(centro_id)}/adjuntos_reportes/{key}/{tipo}")
+
+def normalize_attachments(value):
+    if not isinstance(value, list):
+        return []
+    allowed = {"tipo", "storage_path", "mime_type", "size_bytes", "sha256", "updatedAt", "download_endpoint"}
+    attachments = []
+    for item in value[:10]:
+        if not isinstance(item, dict):
+            continue
+        normalized = {key: item.get(key) for key in allowed if item.get(key) not in (None, "")}
+        if normalized.get("tipo") and normalized.get("storage_path"):
+            attachments.append(normalized)
+    return attachments
 
 def response_parts(result):
     """Normalize a Flask view result without issuing an internal HTTP request."""
@@ -168,6 +192,9 @@ def push_feed():
         # para depurar: quien lo originó según Bubble
         "source_device_id": device_id,
     }
+    adjuntos = normalize_attachments(p.get("adjuntos"))
+    if adjuntos:
+        data["adjuntos"] = adjuntos
 
     # 🔥 DIFUSIÓN A TODOS LOS DISPOSITIVOS REGISTRADOS DEL ECOSISTEMA
     try:
@@ -193,6 +220,7 @@ def push_feed():
                 "estudio": p.get("estudio", ""),
                 "estado_reporte": estado_reporte,
                 "updatedAt": data["updatedAt"],
+                "adjuntos": adjuntos,
             })
             estado_guardado = True
 
@@ -210,6 +238,87 @@ def push_feed():
 
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
+
+@app.post("/subir_esquema_prostata")
+def subir_esquema_prostata():
+    if not check_auth(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+    codigo_unico = str(request.form.get("codigo_unico") or "").strip()
+    centro_id = str(request.form.get("centro_id") or "").strip()
+    email = str(request.form.get("email_usuario") or "").strip()
+    archivo = request.files.get("archivo")
+    if not codigo_unico or not centro_id or not email or archivo is None:
+        return jsonify({"ok": False, "error": "Faltan datos requeridos o el archivo PNG"}), 400
+
+    contenido = archivo.read(MAX_ATTACHMENT_BYTES + 1)
+    if not contenido or len(contenido) > MAX_ATTACHMENT_BYTES:
+        return jsonify({"ok": False, "error": "El esquema prostático excede el tamaño permitido"}), 413
+    if archivo.mimetype != "image/png" or not contenido.startswith(b"\x89PNG\r\n\x1a\n"):
+        return jsonify({"ok": False, "error": "El archivo debe ser una imagen PNG válida"}), 400
+
+    updated_at = int(time.time() * 1000)
+    digest = hashlib.sha256(contenido).hexdigest()
+    state_key = report_state_key(centro_id, codigo_unico)
+    storage_path = f"ecosistemas/{safe_segment(centro_id)}/reportes/{state_key}/esquema_prostata.png"
+    try:
+        blob = storage.bucket().blob(storage_path)
+        blob.metadata = {
+            "tipo": "esquema_prostata",
+            "sha256": digest,
+        }
+        blob.upload_from_string(contenido, content_type="image/png")
+        adjunto = {
+            "tipo": "esquema_prostata",
+            "storage_path": storage_path,
+            "mime_type": "image/png",
+            "size_bytes": len(contenido),
+            "sha256": digest,
+            "updatedAt": updated_at,
+        }
+        attachment_ref(centro_id, codigo_unico).set({
+            **adjunto,
+            "codigo_unico": codigo_unico,
+            "centro_id": centro_id,
+            "email_usuario": email,
+        })
+        return jsonify({"ok": True, "adjunto": adjunto}), 201
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+
+@app.post("/obtener_adjunto_reporte")
+def obtener_adjunto_reporte():
+    if not check_auth(request):
+        return jsonify({"ok": False, "error": "Unauthorized"}), 401
+    try:
+        p = normalize_payload(request.get_json(force=True) or {})
+    except Exception:
+        return jsonify({"ok": False, "error": "JSON inválido"}), 400
+
+    codigo_unico = str(p.get("codigo_unico") or "").strip()
+    centro_id = str(p.get("centro_id") or "").strip()
+    email = str(p.get("email_usuario") or "").strip()
+    tipo = str(p.get("tipo") or "").strip()
+    if not codigo_unico or not centro_id or not email or tipo != "esquema_prostata":
+        return jsonify({"ok": False, "error": "Faltan datos para recuperar el adjunto"}), 400
+
+    try:
+        saved = attachment_ref(centro_id, codigo_unico, tipo).get()
+        if not isinstance(saved, dict):
+            return jsonify({"ok": False, "error": "Adjunto no encontrado"}), 404
+        if not hmac.compare_digest(str(saved.get("codigo_unico") or ""), codigo_unico) or not hmac.compare_digest(str(saved.get("email_usuario") or ""), email):
+            return jsonify({"ok": False, "error": "Adjunto no encontrado"}), 404
+        blob = storage.bucket().blob(str(saved.get("storage_path") or ""))
+        url = blob.generate_signed_url(expiration=timedelta(minutes=15), method="GET", version="v4")
+        return jsonify({
+            "ok": True,
+            "tipo": tipo,
+            "url": url,
+            "expires_in": 900,
+            "sha256": saved.get("sha256"),
+        }), 200
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
 
 @app.post("/guardar-reporte")
 def guardar_reporte():
