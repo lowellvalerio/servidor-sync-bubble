@@ -1,10 +1,9 @@
 # app.py — Render/Flask → Firebase RTDB (/ecosistemas/.../dispositivos/.../feed_estudios)
 import os, json, base64, time, hashlib, hmac, re
-from datetime import timedelta
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import firebase_admin
-from firebase_admin import credentials, db, storage
+from firebase_admin import credentials, db
 
 # 1) Instancia de Flask PRIMERO
 app = Flask(__name__)
@@ -13,7 +12,6 @@ CORS(app)
 # 2) Config
 RTDB_URL = "https://reportes-intenligentes-default-rtdb.firebaseio.com/"
 AUTH_TOKEN = os.getenv("PUSH_FEED_TOKEN")  # opcional (si está seteado, exige Bearer)
-FIREBASE_STORAGE_BUCKET = os.getenv("FIREBASE_STORAGE_BUCKET", "reportes-intenligentes.appspot.com")
 MAX_ATTACHMENT_BYTES = int(os.getenv("MAX_ATTACHMENT_BYTES", str(8 * 1024 * 1024)))
 
 # 3) Init Firebase (acepta ENV JSON, ENV base64 o archivo)
@@ -35,19 +33,19 @@ def init_firebase():
     if sa_b64:
         data = json.loads(base64.b64decode(sa_b64))
         cred = credentials.Certificate(data)
-        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL, "storageBucket": FIREBASE_STORAGE_BUCKET})
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
         print("[creds] usando FIREBASE_SERVICE_ACCOUNT_B64")
         return
 
     if sa_json:
         cred = credentials.Certificate(json.loads(sa_json))
-        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL, "storageBucket": FIREBASE_STORAGE_BUCKET})
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
         print("[creds] usando FIREBASE_SERVICE_ACCOUNT")
         return
 
     if sa_path and os.path.exists(sa_path):
         cred = credentials.Certificate(sa_path)
-        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL, "storageBucket": FIREBASE_STORAGE_BUCKET})
+        firebase_admin.initialize_app(cred, {"databaseURL": RTDB_URL})
         print(f"[creds] usando archivo: {sa_path}")
         return
 
@@ -99,6 +97,10 @@ def safe_segment(value):
 def attachment_ref(centro_id, codigo_unico, tipo="esquema_prostata"):
     key = report_state_key(centro_id, codigo_unico)
     return db.reference(f"/ecosistemas/{safe_segment(centro_id)}/adjuntos_reportes/{key}/{tipo}")
+
+def attachment_database_path(centro_id, codigo_unico, tipo="esquema_prostata"):
+    key = report_state_key(centro_id, codigo_unico)
+    return f"/ecosistemas/{safe_segment(centro_id)}/adjuntos_reportes/{key}/{tipo}"
 
 def normalize_attachments(value):
     if not isinstance(value, list):
@@ -259,18 +261,11 @@ def subir_esquema_prostata():
 
     updated_at = int(time.time() * 1000)
     digest = hashlib.sha256(contenido).hexdigest()
-    state_key = report_state_key(centro_id, codigo_unico)
-    storage_path = f"ecosistemas/{safe_segment(centro_id)}/reportes/{state_key}/esquema_prostata.png"
+    database_path = attachment_database_path(centro_id, codigo_unico)
     try:
-        blob = storage.bucket().blob(storage_path)
-        blob.metadata = {
-            "tipo": "esquema_prostata",
-            "sha256": digest,
-        }
-        blob.upload_from_string(contenido, content_type="image/png")
         adjunto = {
             "tipo": "esquema_prostata",
-            "storage_path": storage_path,
+            "storage_path": f"rtdb:{database_path}",
             "mime_type": "image/png",
             "size_bytes": len(contenido),
             "sha256": digest,
@@ -281,6 +276,7 @@ def subir_esquema_prostata():
             "codigo_unico": codigo_unico,
             "centro_id": centro_id,
             "email_usuario": email,
+            "content_base64": base64.b64encode(contenido).decode("ascii"),
         })
         return jsonify({"ok": True, "adjunto": adjunto}), 201
     except Exception as exc:
@@ -308,13 +304,14 @@ def obtener_adjunto_reporte():
             return jsonify({"ok": False, "error": "Adjunto no encontrado"}), 404
         if not hmac.compare_digest(str(saved.get("codigo_unico") or ""), codigo_unico) or not hmac.compare_digest(str(saved.get("email_usuario") or ""), email):
             return jsonify({"ok": False, "error": "Adjunto no encontrado"}), 404
-        blob = storage.bucket().blob(str(saved.get("storage_path") or ""))
-        url = blob.generate_signed_url(expiration=timedelta(minutes=15), method="GET", version="v4")
+        content_base64 = str(saved.get("content_base64") or "")
+        if not content_base64:
+            return jsonify({"ok": False, "error": "Adjunto no encontrado"}), 404
         return jsonify({
             "ok": True,
             "tipo": tipo,
-            "url": url,
-            "expires_in": 900,
+            "mime_type": saved.get("mime_type", "image/png"),
+            "content_base64": content_base64,
             "sha256": saved.get("sha256"),
         }), 200
     except Exception as exc:

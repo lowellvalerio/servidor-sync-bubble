@@ -7,5 +7,3 @@ services:
     envVars:
       - key: PORT
         value: 10000
-      - key: FIREBASE_STORAGE_BUCKET
-        value: reportes-intenligentes.appspot.com
